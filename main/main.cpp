@@ -123,7 +123,7 @@ void configure_i2c(void) {
     i2c_driver_install(0, config.mode, 0, 0, 0);
 }
 void configure_MPU6050(void) {
-    
+
 }
 uint16_t read_i2c_device(void) {
     uint8_t reg_address = 0x40;
@@ -184,7 +184,7 @@ void vTaskButtonsRead(void* pvParameter) {
     }
 }
 void vTaskI2CRead(void* pvParameter) {
-    configure_i2c_device();
+    configure_i2c();
     for (;;) {
         printf("accel 8 bit z was: %u \n", read_i2c_device());
         vTaskDelay(1000/portTICK_PERIOD_MS);
