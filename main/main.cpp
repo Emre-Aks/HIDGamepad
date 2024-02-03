@@ -3,108 +3,77 @@
 #include "freertos/task.h"
 #include "NimBLEDevice.h"
 #include "NimBLEHIDDevice.h"
-#include "drivers.h"
+extern "C" {
+    #include "drivers.h"
+}
+#include "BLE.h"
 
 //globals
-NimBLEAdvertising* advertizer;
-NimBLECharacteristic* characteristic;
-NimBLEServer* server;
-static uint8_t reportMap[] = {// This looks like { report id [00000000] 8 buttons [00000000] 8 buttons [00000000] }
-    //controller report map
-    0x05, 0x01,  //  Usage Page (Generic Desktop Ctrls)
-    0x09, 0x05,  //  Usage (Game Pad)
-    0xA1, 0x01,  // Collection (Application)
-    0x85, 0x04,  //  Report ID (4)
-    0x05, 0x09,  //  Usage Page (Button)
-    0x19, 0x01,  //  Usage Minimum (Button 1)
-    0x29, 0x10,  //  Usage Maximum (Button 16)
-    0x15, 0x00,  //  Logical Minimum (0)
-    0x25, 0x01,  //  Logical Maximum (1)
-    0x75, 0x01,  //  Report Size (1)
-    0x95, 0x10,  //  Report Count (1)
-    0x81, 0x02,  //  Input (Data,Var,Abs,No Wrap,Linear,Preferred State,No Null Position)
-    0xC0,        // End Collection
-};
+volatile uint8_t inputBufr[10] = {0,0,0,0,0,0,0,0,0,0};
 TaskHandle_t* xHandleButtons = NULL;
 TaskHandle_t* xHandleAnalog = NULL;
-TaskHandle_t* xHandleI2C = NULL;
+TaskHandle_t* xHandleMPU6050 = NULL;
 
-void configure_bluetooth(void) {
-    NimBLEDevice::init("very_cool_gamepad");// init BLE stack
-
-    //Create the BLE server that hosts the service
-    server = NimBLEDevice::createServer();
-
-    //create HID device service on server
-    NimBLEHIDDevice* HIDDevice = new NimBLEHIDDevice(server);
-
-    HIDDevice->hidInfo(0x00, 0x01);
-
-    //optional stuff
-    HIDDevice->setBatteryLevel(69);
-
-    HIDDevice->reportMap(reportMap, sizeof(reportMap));//the report map is an array of 25 bytes
-
-    //Characteristic for sending input reports to client (global because used in tasks)
-    characteristic = HIDDevice->inputReport(4);
-
-    //start the hid service
-    HIDDevice->startServices();
-
-    //advertizer for advertizing to clients (global because used in tasks)
-    advertizer = server->getAdvertising();
-    advertizer->setAppearance(HID_GAMEPAD);
-    advertizer->addServiceUUID(HIDDevice->hidService()->getUUID());
-    advertizer->start();
-}
-void re_advertize(void) {
-
-    //kill the input reading tasks call advertizing function
-    //re-start the input reading tasks after a connection is formed
-}
 void vTaskAnalogRead(void *pvParameter) {
+    BLE* BLEInstance = (BLE*)pvParameter;
+    configure_adc();
+
     for (;;) {
-    }
-}
-void vTaskButtonsRead(void* pvParameter) {
-    configure_buttons();
-    uint16_t buffer;
-    for (;;) {
-        buffer = read_buttons();
-        //vTaskSuspend();//suspend tasks that share characteristic
-        characteristic->setValue(buffer);//pointer issue?
-        characteristic->notify();
-        //xTaskResume();//resume tasks that share characteristic
+        inputBufr[7] = read_mic();
+        BLEInstance->characteristic->setValue((uint8_t*)&inputBufr, 10);
+        BLEInstance->characteristic->notify();
         vTaskDelay(10/portTICK_PERIOD_MS);
     }
 }
-void vTaskI2CRead(void* pvParameter) {
-    configure_i2c();
+void vTaskButtonsRead(void* pvParameter) {
+    BLE* BLEInstance = (BLE*)pvParameter;
+    configure_buttons();
+
     for (;;) {
-        printf("accel 8 bit z was: %u \n", read_i2c_device());
-        vTaskDelay(1000/portTICK_PERIOD_MS);
+        inputBufr[0] = read_buttons();
+        BLEInstance->characteristic->setValue((uint8_t*)&inputBufr, 10);
+        BLEInstance->characteristic->notify();
+        vTaskDelay(10/portTICK_PERIOD_MS);
     }
 }
-void vTaskBlink(void* pvParameter) {
-    configure_led();
-    bool state = true;
+void vTaskMPU6050Read(void* pvParameter) {
+    BLE* BLEInstance = (BLE*)pvParameter;
+
+    int16_t accel_data[3];
+    int16_t gyro_data[3];
+
+    configure_i2c();
+    configure_MPU6050();
+
     for (;;) {
-        set_led(state, 1,1,1);
-        state = !state;
-        vTaskDelay(1000/portTICK_PERIOD_MS);
-        set_led(state, 1,1,1);
-        state = !state;
-        vTaskDelay(1000/portTICK_PERIOD_MS);
+        //read accel
+        if (read_MPU6050_accel(accel_data) != ESP_OK) {
+            printf("BAD JUJU HAPPENED!\n");
+        }
+        vTaskDelay(10/portTICK_PERIOD_MS);
+        //read gyro
+        if (read_MPU6050_gyro(gyro_data) != ESP_OK) {
+            printf("BAD JUJU HAPPENED!\n");
+        }
+        vTaskDelay(10/portTICK_PERIOD_MS);
+        //add to buffer and notify
+        for (int i = 0; i < 3; i++) {
+            inputBufr[i+1] = accel_data[i];
+            inputBufr[i+4] = gyro_data[i];
+        }
+        BLEInstance->characteristic->setValue((uint8_t*)inputBufr, 10);
+        BLEInstance->characteristic->notify();
     }
 }
 extern "C" void app_main(void)
-{   
+{
+    BLE BLEInstance = BLE();
     //Start bluetooth stack in RTOS
-    configure_bluetooth();
+    BLEInstance.configure_bluetooth();
     //wait for connection, blue status led (main is a task so this doesnt block bt activities)
     configure_led();
     bool state = true;
-    while (server->getConnectedCount() == 0) {
+    while (BLEInstance.server->getConnectedCount() == 0) {
         set_led(state,0,0,10);
         state = !state;
         vTaskDelay(1000/portTICK_PERIOD_MS);
@@ -113,13 +82,13 @@ extern "C" void app_main(void)
         vTaskDelay(1000/portTICK_PERIOD_MS);
     }
 
-    //connection seccuded, green solid status led
+    //connection succeded, green solid status led
     set_led(1,0,10,0);
     //create and start read tasks
-    //xTaskCreate(&vTaskBlink, "BlinkTask", 6000, NULL, 1, NULL);
-    //xTaskCreate(&vTaskButtonsRead, "ButtonTask", 6000, NULL, 1, NULL);
-    xTaskCreate(&vTaskI2CRead, "I2CTask", 6000, NULL, 1, NULL);
+    xTaskCreate(&vTaskAnalogRead, "AnalogTask", 6000, &BLEInstance, 1, xHandleAnalog);
+    xTaskCreate(&vTaskButtonsRead, "ButtonTask", 6000, &BLEInstance, 1, xHandleButtons);
+    xTaskCreate(&vTaskMPU6050Read, "I2CTask", 12000, &BLEInstance, 1, xHandleMPU6050);
 
-    //done with main task
-    vTaskSuspend(NULL);//once setup is complete, our other tasks handle everything else, main can be suspended
+    //done with setup, above tasks handle all functionality
+    vTaskSuspend(NULL);
 }
